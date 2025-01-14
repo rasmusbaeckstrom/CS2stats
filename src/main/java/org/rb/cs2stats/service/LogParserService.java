@@ -1,103 +1,172 @@
 package org.rb.cs2stats.service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import org.rb.cs2stats.entity.*;
+import org.rb.cs2stats.repository.*;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
-import java.io.*;
+
+import java.io.File;
+import java.io.IOException;
 import java.nio.file.Files;
-import java.nio.file.Paths;
-import java.util.*;
-import java.util.regex.*;
+import java.util.List;
+import java.util.logging.Logger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service
 public class LogParserService {
 
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    @Autowired
+    private GameMatchRepository gameMatchRepository;
 
-    public Map<String, Object> parseLogFile(String filePath) throws IOException {
-        List<Map<String, Object>> matches = new ArrayList<>();
-        List<Map<String, Object>> players = new ArrayList<>();
-        List<Map<String, Object>> events = new ArrayList<>();
-        List<Map<String, Object>> playerStats = new ArrayList<>();
+    @Autowired
+    private PlayerRepository playerRepository;
 
-        Map<String, String> steamIdToName = new HashMap<>();
-        int matchId = 1;
-        String currentMap = null;
+    private static final Logger logger = Logger.getLogger(LogParserService.class.getName());
+    private static final int MAX_ROUNDS_TO_WIN = 13;
 
-        List<String> lines = Files.readAllLines(Paths.get(filePath));
+    private boolean isHalftime = false;  // Spårar om sidbyte har inträffat
+    private int roundCounter = 0;
+
+    public void parseLogFile(File file) throws IOException {
+        List<String> lines = Files.readAllLines(file.toPath());
+        GameMatch gameMatch = new GameMatch();
+        Round currentRound = null;
+
         for (String line : lines) {
-            // Match start och karta
-            if (line.contains("World triggered \"Match_Start\"")) {
-                Matcher mapMatcher = Pattern.compile("on \"([^\"]+)\"").matcher(line);
-                if (mapMatcher.find()) {
-                    currentMap = mapMatcher.group(1);
-                    Map<String, Object> match = new HashMap<>();
-                    match.put("MatchID", matchId++);
-                    match.put("Map", currentMap);
-                    matches.add(match);
+            if (line.contains("Match_Start")) {
+                resetMatchState(gameMatch);
+                continue;
+            }
+
+            if (ignoreWarmupOrEmptyLines(line)) continue;
+
+            handleMapAndServerInfo(line, gameMatch);
+            handlePlayerConnectionAndEvents(line);
+
+            if (line.contains("Round_Start")) {
+                roundCounter++;
+                currentRound = startNewRound(gameMatch);
+                logger.info("New round started: " + roundCounter);
+            }
+
+            if (line.contains("Round_End") && currentRound != null) {
+                endRound(currentRound, gameMatch);
+            }
+
+            if (line.contains("MatchStatus: Score:")) {
+                int scoreT = safeParseInt(extractField(line, "Score: (\\d+):"), 0);
+                int scoreCT = safeParseInt(extractField(line, "Score: \\d+:(\\d+)"), 0);
+
+                if (isHalftime) {
+                    logger.info("Applying side switch logic to MatchStatus scores.");
+                    int temp = scoreCT;
+                    scoreCT = scoreT;
+                    scoreT = temp;
+                }
+
+                if (currentRound != null) {
+                    currentRound.setScoreT(scoreT);
+                    currentRound.setScoreCT(scoreCT);
+                    logger.info("Updated round score from MatchStatus: T-" + scoreT + ", CT-" + scoreCT);
                 }
             }
 
-            // Spelare kopplar upp sig
-            if (line.contains("connected")) {
-                Matcher steamIdMatcher = Pattern.compile("\\[U:1:(\\d+)]").matcher(line);
-                Matcher nameMatcher = Pattern.compile("\"([^\"]+)<").matcher(line);
-                if (steamIdMatcher.find() && nameMatcher.find()) {
-                    String steamId = steamIdMatcher.group(1);
-                    String playerName = nameMatcher.group(1);
-                    steamIdToName.put(steamId, playerName);
-
-                    Map<String, Object> player = new HashMap<>();
-                    player.put("SteamID", steamId);
-                    player.put("PlayerName", playerName);
-                    players.add(player);
-                }
+            if (line.contains("Halftime")) {
+                isHalftime = true;
+                logger.info("Halftime reached - teams switched sides.");
             }
 
-            // Kills, dödsfall och events
-            if (line.contains("killed")) {
-                Matcher killMatcher = Pattern.compile("\"([^\"]+)\".*killed \"([^\"]+)\".*with \"([^\"]+)\"").matcher(line);
-                if (killMatcher.find()) {
-                    String killer = killMatcher.group(1);
-                    String victim = killMatcher.group(2);
-                    String weapon = killMatcher.group(3);
-
-                    Map<String, Object> event = new HashMap<>();
-                    event.put("MatchID", matchId);
-                    event.put("PlayerName", killer);
-                    event.put("TargetName", victim);
-                    event.put("Weapon", weapon);
-                    event.put("EventType", "kill");
-                    event.put("EventTime", line.substring(2, 21)); // Exempel: "07/06/2024 - 23:40:42"
-                    events.add(event);
-                }
-            }
-
-            // Player stats
-            if (line.contains("round_stats") && line.contains("players")) {
-                Matcher statsMatcher = Pattern.compile("\"player_\\d+\" : \"(.+)\"").matcher(line);
-                if (statsMatcher.find()) {
-                    String[] stats = statsMatcher.group(1).split(",");
-                    Map<String, Object> stat = new HashMap<>();
-                    stat.put("PlayerID", stats[0].trim());
-                    stat.put("Kills", Integer.parseInt(stats[3].trim()));
-                    stat.put("Deaths", Integer.parseInt(stats[4].trim()));
-                    stat.put("Assists", Integer.parseInt(stats[5].trim()));
-                    stat.put("Headshots", Float.parseFloat(stats[7].trim()));
-                    stat.put("MoneySpent", Integer.parseInt(stats[2].trim()));
-                    playerStats.add(stat);
-                }
+            if (line.contains("Game Over")) {
+                saveMatchIfValid(gameMatch);
+                break;
             }
         }
 
-        Map<String, Object> result = new HashMap<>();
-        result.put("matches", matches);
-        result.put("players", players);
-        result.put("events", events);
-        result.put("player_stats", playerStats);
+        saveMatchIfValid(gameMatch);
+    }
 
-        // Skriv JSON till fil
-        objectMapper.writeValue(new File("cs2_parsed.json"), result);
+    private void resetMatchState(GameMatch gameMatch) {
+        if (!gameMatch.getRounds().isEmpty()) {
+            saveMatchIfValid(gameMatch);
+        }
+        isHalftime = false;
+        roundCounter = 0;
+        logger.info("New match started.");
+    }
 
-        return result;
+    private boolean ignoreWarmupOrEmptyLines(String line) {
+        return line.contains("Warmup") || line.trim().isEmpty() || line.contains("Round_Restart");
+    }
+
+    private void handleMapAndServerInfo(String line, GameMatch gameMatch) {
+        if (line.contains("\"map\"")) {
+            gameMatch.setMapName(extractField(line, "\"map\"\\s*:\\s*\"(.*?)\""));
+        }
+        if (line.contains("server_cvar")) {
+            gameMatch.setServerName(extractField(line, "server_cvar:\\s*\"(.*?)\""));
+        }
+    }
+
+    private void handlePlayerConnectionAndEvents(String line) {
+        if (line.contains("SourceTV") || line.contains("<Spectator>")) {
+            logger.info("Ignoring spectator or SourceTV connection.");
+            return;
+        }
+
+        String steamId = extractField(line, "\\[U:1:(\\d+)]");
+        String playerName = extractField(line, "\"(.+?)<\\d+><\\[U");
+
+        if (steamId != null && playerName != null) {
+            if (!playerRepository.existsById(steamId)) {
+                playerRepository.save(new Player(steamId, playerName));
+                logger.info("New player saved: " + playerName + " [" + steamId + "]");
+            }
+        }
+    }
+
+    private Round startNewRound(GameMatch gameMatch) {
+        Round round = new Round();
+        round.setRoundNumber(roundCounter);
+        round.setGameMatch(gameMatch);
+        return round;
+    }
+
+    private void endRound(Round round, GameMatch gameMatch) {
+        gameMatch.getRounds().add(round);
+        logger.info("Round " + round.getRoundNumber() + " ended with score: T-" + round.getScoreT() + ", CT-" + round.getScoreCT());
+
+        if (isMatchOver(round.getScoreT(), round.getScoreCT())) {
+            logger.info("Match over detected at round " + round.getRoundNumber());
+            saveMatchIfValid(gameMatch);
+        }
+    }
+
+    private void saveMatchIfValid(GameMatch gameMatch) {
+        if (!gameMatch.getRounds().isEmpty()) {
+            gameMatchRepository.save(gameMatch);
+            logger.info("Match saved with " + gameMatch.getRounds().size() + " rounds.");
+        } else {
+            logger.warning("No rounds found for match.");
+        }
+    }
+
+    private String extractField(String line, String regex) {
+        Pattern pattern = Pattern.compile(regex);
+        Matcher matcher = pattern.matcher(line);
+        return matcher.find() ? matcher.group(1) : null;
+    }
+
+    private int safeParseInt(String str, int defaultValue) {
+        try {
+            return str != null ? Integer.parseInt(str) : defaultValue;
+        } catch (NumberFormatException e) {
+            logger.warning("Failed to parse int from string: " + str);
+            return defaultValue;
+        }
+    }
+
+    private boolean isMatchOver(int scoreT, int scoreCT) {
+        return scoreT >= MAX_ROUNDS_TO_WIN || scoreCT >= MAX_ROUNDS_TO_WIN;
     }
 }
