@@ -25,7 +25,8 @@ public class LogParserService {
     private static final Logger logger = Logger.getLogger(LogParserService.class.getName());
     private static final int MAX_ROUNDS_TO_WIN = 13;
 
-    private boolean isHalftime = false;  // Spårar om sidbyte har inträffat
+    private boolean isMatchLive = false;  // För att spåra om matchen är igång
+    private boolean matchCompleted = false;  // För att spåra om matchen är avslutad
     private int roundCounter = 0;
 
     public void parseLogFile(File file) throws IOException {
@@ -34,12 +35,28 @@ public class LogParserService {
         Round currentRound = null;
 
         for (String line : lines) {
-            if (line.contains("Match_Start")) {
-                resetMatchState(gameMatch);
+            if (matchCompleted) {  // Om matchen redan är avslutad, ignorera resten av filen
+                logger.info("Match already completed; ignoring further lines.");
+                break;
+            }
+
+            if (line.contains("rcon exec live") || line.contains("Match_Start") || line.contains("Game_Commencing")) {
+                isMatchLive = true;
+                roundCounter = 0;
+                gameMatch = new GameMatch();  // Ny match påbörjad
+                logger.info("Match officially started: " + line);
                 continue;
             }
 
-            if (ignoreWarmupOrEmptyLines(line)) continue;
+            if (!isMatchLive) {
+                logger.fine("Ignoring line before match start: " + line);
+                continue;
+            }
+
+            if (line.contains("Warmup") || line.contains("Loading map")) {
+                logger.info("Ignoring warmup or loading map line: " + line);
+                continue;
+            }
 
             handleMapAndServerInfo(line, gameMatch);
             handlePlayerConnectionAndEvents(line);
@@ -48,60 +65,44 @@ public class LogParserService {
                 roundCounter++;
                 currentRound = startNewRound(gameMatch);
                 logger.info("New round started: " + roundCounter);
+                continue;
             }
 
             if (line.contains("Round_End") && currentRound != null) {
                 endRound(currentRound, gameMatch);
+                continue;
             }
 
             if (line.contains("MatchStatus: Score:")) {
                 int scoreT = safeParseInt(extractField(line, "Score: (\\d+):"), 0);
                 int scoreCT = safeParseInt(extractField(line, "Score: \\d+:(\\d+)"), 0);
 
-                if (isHalftime) {
-                    logger.info("Applying side switch logic to MatchStatus scores.");
-                    int temp = scoreCT;
-                    scoreCT = scoreT;
-                    scoreT = temp;
-                }
-
                 if (currentRound != null) {
                     currentRound.setScoreT(scoreT);
                     currentRound.setScoreCT(scoreCT);
                     logger.info("Updated round score from MatchStatus: T-" + scoreT + ", CT-" + scoreCT);
                 }
-            }
-
-            if (line.contains("Halftime")) {
-                isHalftime = true;
-                logger.info("Halftime reached - teams switched sides.");
+                continue;
             }
 
             if (line.contains("Game Over")) {
+                logger.info("Game Over detected, match concluded.");
                 saveMatchIfValid(gameMatch);
-                break;
+                isMatchLive = false;
+                matchCompleted = true;  // Markera matchen som avslutad
+                continue;
             }
         }
 
-        saveMatchIfValid(gameMatch);
-    }
-
-    private void resetMatchState(GameMatch gameMatch) {
-        if (!gameMatch.getRounds().isEmpty()) {
-            saveMatchIfValid(gameMatch);
+        if (!matchCompleted) {
+            saveMatchIfValid(gameMatch);  // Spara om matchen är komplett och inte avslutad
         }
-        isHalftime = false;
-        roundCounter = 0;
-        logger.info("New match started.");
-    }
-
-    private boolean ignoreWarmupOrEmptyLines(String line) {
-        return line.contains("Warmup") || line.trim().isEmpty() || line.contains("Round_Restart");
     }
 
     private void handleMapAndServerInfo(String line, GameMatch gameMatch) {
         if (line.contains("\"map\"")) {
             gameMatch.setMapName(extractField(line, "\"map\"\\s*:\\s*\"(.*?)\""));
+            logger.info("Map set to: " + gameMatch.getMapName());
         }
         if (line.contains("server_cvar")) {
             gameMatch.setServerName(extractField(line, "server_cvar:\\s*\"(.*?)\""));
@@ -118,10 +119,15 @@ public class LogParserService {
         String playerName = extractField(line, "\"(.+?)<\\d+><\\[U");
 
         if (steamId != null && playerName != null) {
+            Player player = playerRepository.findById(steamId).orElse(new Player(steamId, playerName));
             if (!playerRepository.existsById(steamId)) {
-                playerRepository.save(new Player(steamId, playerName));
-                logger.info("New player saved: " + playerName + " [" + steamId + "]");
+                logger.info("Saving new player: " + playerName + " [" + steamId + "]");
+                playerRepository.save(player);
             }
+        }
+
+        if (line.contains("disconnected")) {
+            logger.info("Player disconnected: " + (playerName != null ? playerName : "unknown"));
         }
     }
 
@@ -139,6 +145,8 @@ public class LogParserService {
         if (isMatchOver(round.getScoreT(), round.getScoreCT())) {
             logger.info("Match over detected at round " + round.getRoundNumber());
             saveMatchIfValid(gameMatch);
+            isMatchLive = false;  // Återställ status
+            matchCompleted = true;  // Markera matchen som avslutad för att förhindra omimport
         }
     }
 
