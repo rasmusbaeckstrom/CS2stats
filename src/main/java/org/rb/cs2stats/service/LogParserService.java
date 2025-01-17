@@ -1,15 +1,22 @@
 package org.rb.cs2stats.service;
 
-import org.rb.cs2stats.entity.*;
-import org.rb.cs2stats.repository.*;
+import org.rb.cs2stats.entity.GameMatch;
+import org.rb.cs2stats.entity.PlayerMatchStats;
+import org.rb.cs2stats.entity.Player;
+import org.rb.cs2stats.repository.GameMatchRepository;
+import org.rb.cs2stats.repository.PlayerMatchStatsRepository;
+import org.rb.cs2stats.repository.PlayerRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
-import java.io.File;
+import java.io.BufferedReader;
+import java.io.FileReader;
 import java.io.IOException;
-import java.nio.file.Files;
-import java.util.List;
-import java.util.logging.Logger;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -22,159 +29,154 @@ public class LogParserService {
     @Autowired
     private PlayerRepository playerRepository;
 
-    private static final Logger logger = Logger.getLogger(LogParserService.class.getName());
-    private static final int MAX_ROUNDS_TO_WIN = 13;
+    @Autowired
+    private PlayerMatchStatsRepository playerMatchStatsRepository;
 
-    private boolean isMatchLive = false;  // För att spåra om matchen är igång
-    private boolean matchCompleted = false;  // För att spåra om matchen är avslutad
-    private int roundCounter = 0;
+    private static final Pattern PLAYER_JOIN_PATTERN = Pattern.compile("\"(.*?)<\\d+><\\[U:1:(\\d+)]><>\" entered the game");
+    private static final Pattern GAME_OVER_PATTERN = Pattern.compile("Game Over: .* score (\\d+):(\\d+) after .*");
+    private static final Pattern MATCH_STATUS_PATTERN = Pattern.compile("MatchStatus: Score: (\\d+):(\\d+) on map \\\"(.*?)\\\"");
+    private static final Pattern SERVER_NAME_PATTERN = Pattern.compile("\"server\" : \"(.*?)\"");
+    private static final Pattern LOG_START_PATTERN = Pattern.compile("Log file started \\(file \\\"logs/(\\d{4}_\\d{2}_\\d{2}_\\d{6})_\\d+\\.log\\\"");
 
-    public void parseLogFile(File file) throws IOException {
-        List<String> lines = Files.readAllLines(file.toPath());
-        GameMatch gameMatch = new GameMatch();
-        Round currentRound = null;
+    private GameMatch currentMatch;
+    private Set<String> currentPlayers = new HashSet<>();
+    private LocalDateTime logStartDate;
 
-        for (String line : lines) {
-            if (matchCompleted) {  // Om matchen redan är avslutad, ignorera resten av filen
-                logger.info("Match already completed; ignoring further lines.");
-                break;
-            }
+    @Transactional
+    public void parseLogFile(String filePath) {
+        try (BufferedReader br = new BufferedReader(new FileReader(filePath))) {
+            String line;
+            boolean isLogStartProcessed = false;
 
-            if (line.contains("rcon exec live") || line.contains("Match_Start") || line.contains("Game_Commencing")) {
-                isMatchLive = true;
-                roundCounter = 0;
-                gameMatch = new GameMatch();  // Ny match påbörjad
-                logger.info("Match officially started: " + line);
-                continue;
-            }
-
-            if (!isMatchLive) {
-                logger.fine("Ignoring line before match start: " + line);
-                continue;
-            }
-
-            if (line.contains("Warmup") || line.contains("Loading map")) {
-                logger.info("Ignoring warmup or loading map line: " + line);
-                continue;
-            }
-
-            handleMapAndServerInfo(line, gameMatch);
-            handlePlayerConnectionAndEvents(line);
-
-            if (line.contains("Round_Start")) {
-                roundCounter++;
-                currentRound = startNewRound(gameMatch);
-                logger.info("New round started: " + roundCounter);
-                continue;
-            }
-
-            if (line.contains("Round_End") && currentRound != null) {
-                endRound(currentRound, gameMatch);
-                continue;
-            }
-
-            if (line.contains("MatchStatus: Score:")) {
-                int scoreT = safeParseInt(extractField(line, "Score: (\\d+):"), 0);
-                int scoreCT = safeParseInt(extractField(line, "Score: \\d+:(\\d+)"), 0);
-
-                if (currentRound != null) {
-                    currentRound.setScoreT(scoreT);
-                    currentRound.setScoreCT(scoreCT);
-                    logger.info("Updated round score from MatchStatus: T-" + scoreT + ", CT-" + scoreCT);
+            while ((line = br.readLine()) != null) {
+                if (!isLogStartProcessed && line.contains("Log file started")) {
+                    extractLogStartDate(line);
+                    isLogStartProcessed = true;
                 }
-                continue;
+                processLine(line, filePath);
             }
-
-            if (line.contains("Game Over")) {
-                logger.info("Game Over detected, match concluded.");
-                saveMatchIfValid(gameMatch);
-                isMatchLive = false;
-                matchCompleted = true;  // Markera matchen som avslutad
-                continue;
-            }
-        }
-
-        if (!matchCompleted) {
-            saveMatchIfValid(gameMatch);  // Spara om matchen är komplett och inte avslutad
+        } catch (IOException e) {
+            e.printStackTrace();
         }
     }
 
-    private void handleMapAndServerInfo(String line, GameMatch gameMatch) {
-        if (line.contains("\"map\"")) {
-            gameMatch.setMapName(extractField(line, "\"map\"\\s*:\\s*\"(.*?)\""));
-            logger.info("Map set to: " + gameMatch.getMapName());
-        }
-        if (line.contains("server_cvar")) {
-            gameMatch.setServerName(extractField(line, "server_cvar:\\s*\"(.*?)\""));
+    private void extractLogStartDate(String line) {
+        Matcher matcher = LOG_START_PATTERN.matcher(line);
+        if (matcher.find()) {
+            String logFileTimestamp = matcher.group(1); // Extract "2024_07_03_231351"
+            System.out.println("Found log file timestamp: " + logFileTimestamp);
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy_MM_dd_HHmmss");
+            try {
+                logStartDate = LocalDateTime.parse(logFileTimestamp, formatter);
+            } catch (Exception e) {
+                e.printStackTrace();
+                logStartDate = LocalDateTime.now(); // Fallback to current time
+            }
+        } else {
+            System.out.println("LOG_START_PATTERN did not match the line: " + line);
+            logStartDate = LocalDateTime.now(); // Fallback
         }
     }
 
-    private void handlePlayerConnectionAndEvents(String line) {
-        if (line.contains("SourceTV") || line.contains("<Spectator>")) {
-            logger.info("Ignoring spectator or SourceTV connection.");
-            return;
+
+
+    private void processLine(String line, String filePath) {
+        if (line.contains("entered the game")) {
+            processPlayerJoin(line);
+        } else if (line.contains("MatchStatus: Score:")) {
+            processMatchStatus(line);
+        } else if (line.contains("Game Over")) {
+            processGameOver(line, filePath);
         }
+    }
 
-        String steamId = extractField(line, "\\[U:1:(\\d+)]");
-        String playerName = extractField(line, "\"(.+?)<\\d+><\\[U");
+    private void processPlayerJoin(String line) {
+        Matcher matcher = PLAYER_JOIN_PATTERN.matcher(line);
+        if (matcher.find()) {
+            String playerName = matcher.group(1);
+            String steamId = matcher.group(2);
 
-        if (steamId != null && playerName != null) {
-            Player player = playerRepository.findById(steamId).orElse(new Player(steamId, playerName));
-            if (!playerRepository.existsById(steamId)) {
-                logger.info("Saving new player: " + playerName + " [" + steamId + "]");
+            Player player = playerRepository.findById(steamId)
+                    .orElseGet(() -> {
+                        Player newPlayer = new Player();
+                        newPlayer.setSteamId(steamId);
+                        newPlayer.setName(playerName);
+                        playerRepository.save(newPlayer);
+                        return newPlayer;
+                    });
+
+            if (!player.getName().equals(playerName)) {
+                player.setName(playerName);
                 playerRepository.save(player);
             }
-        }
 
-        if (line.contains("disconnected")) {
-            logger.info("Player disconnected: " + (playerName != null ? playerName : "unknown"));
+            currentPlayers.add(steamId);
         }
     }
 
-    private Round startNewRound(GameMatch gameMatch) {
-        Round round = new Round();
-        round.setRoundNumber(roundCounter);
-        round.setGameMatch(gameMatch);
-        return round;
-    }
+    private void processMatchStatus(String line) {
+        Matcher matcher = MATCH_STATUS_PATTERN.matcher(line);
+        if (matcher.find()) {
+            int scoreCT = Integer.parseInt(matcher.group(1));
+            int scoreT = Integer.parseInt(matcher.group(2));
+            String mapName = matcher.group(3);
 
-    private void endRound(Round round, GameMatch gameMatch) {
-        gameMatch.getRounds().add(round);
-        logger.info("Round " + round.getRoundNumber() + " ended with score: T-" + round.getScoreT() + ", CT-" + round.getScoreCT());
+            if (currentMatch == null) {
+                currentMatch = new GameMatch();
+                currentMatch.setCreatedAt(logStartDate != null ? logStartDate : LocalDateTime.now());
+            }
 
-        if (isMatchOver(round.getScoreT(), round.getScoreCT())) {
-            logger.info("Match over detected at round " + round.getRoundNumber());
-            saveMatchIfValid(gameMatch);
-            isMatchLive = false;  // Återställ status
-            matchCompleted = true;  // Markera matchen som avslutad för att förhindra omimport
+            currentMatch.setMapName(mapName);
+            currentMatch.setScoreCT(scoreCT);
+            currentMatch.setScoreT(scoreT);
         }
     }
 
-    private void saveMatchIfValid(GameMatch gameMatch) {
-        if (!gameMatch.getRounds().isEmpty()) {
-            gameMatchRepository.save(gameMatch);
-            logger.info("Match saved with " + gameMatch.getRounds().size() + " rounds.");
-        } else {
-            logger.warning("No rounds found for match.");
+    private void processGameOver(String line, String filePath) {
+        Matcher matcher = GAME_OVER_PATTERN.matcher(line);
+        if (matcher.find() && currentMatch != null) {
+            int finalScoreCT = Integer.parseInt(matcher.group(1));
+            int finalScoreT = Integer.parseInt(matcher.group(2));
+
+            currentMatch.setScoreCT(finalScoreCT);
+            currentMatch.setScoreT(finalScoreT);
+            currentMatch.setServerName(extractServerName(filePath));
+            currentMatch.setCreatedAt(logStartDate != null ? logStartDate : LocalDateTime.now());
+
+            gameMatchRepository.save(currentMatch);
+
+            linkPlayersToMatch();
+
+            currentMatch = null;
+            currentPlayers.clear();
         }
     }
 
-    private String extractField(String line, String regex) {
-        Pattern pattern = Pattern.compile(regex);
-        Matcher matcher = pattern.matcher(line);
-        return matcher.find() ? matcher.group(1) : null;
-    }
+    private void linkPlayersToMatch() {
+        for (String steamId : currentPlayers) {
+            Player player = playerRepository.findById(steamId)
+                    .orElseThrow(() -> new IllegalArgumentException("Player with SteamID " + steamId + " not found"));
 
-    private int safeParseInt(String str, int defaultValue) {
-        try {
-            return str != null ? Integer.parseInt(str) : defaultValue;
-        } catch (NumberFormatException e) {
-            logger.warning("Failed to parse int from string: " + str);
-            return defaultValue;
+            PlayerMatchStats matchStats = new PlayerMatchStats();
+            matchStats.setGameMatch(currentMatch);
+            matchStats.setPlayer(player);
+
+            playerMatchStatsRepository.save(matchStats);
         }
     }
 
-    private boolean isMatchOver(int scoreT, int scoreCT) {
-        return scoreT >= MAX_ROUNDS_TO_WIN || scoreCT >= MAX_ROUNDS_TO_WIN;
+    private String extractServerName(String filePath) {
+        try (BufferedReader br = new BufferedReader(new FileReader(filePath))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                Matcher matcher = SERVER_NAME_PATTERN.matcher(line);
+                if (matcher.find()) {
+                    return matcher.group(1);
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return "Unknown Server";
     }
 }
