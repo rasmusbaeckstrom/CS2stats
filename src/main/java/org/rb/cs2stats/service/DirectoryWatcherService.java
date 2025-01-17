@@ -30,7 +30,7 @@ public class DirectoryWatcherService {
             for (File file : files) {
                 try {
                     logger.info("Processing file: " + file.getName());
-                    logParserService.parseLogFile(file);
+                    logParserService.parseLogFile(String.valueOf(file));
                     // Efter att filen parsats, flytta den till processed-katalogen
                     Files.move(file.toPath(), Paths.get(PROCESSED_DIRECTORY, file.getName()), StandardCopyOption.REPLACE_EXISTING);
                     logger.info("File moved to processed: " + file.getName());
