@@ -15,7 +15,9 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -37,9 +39,11 @@ public class LogParserService {
     private static final Pattern MATCH_STATUS_PATTERN = Pattern.compile("MatchStatus: Score: (\\d+):(\\d+) on map \\\"(.*?)\\\"");
     private static final Pattern SERVER_NAME_PATTERN = Pattern.compile("\"server\" : \"(.*?)\"");
     private static final Pattern LOG_START_PATTERN = Pattern.compile("Log file started \\(file \\\"logs/(\\d{4}_\\d{2}_\\d{2}_\\d{6})_\\d+\\.log\\\"");
+    private static final Pattern TEAM_ASSIGNMENT_PATTERN = Pattern.compile("\".*?<\\d+><\\[U:1:(\\d+)]><(TERRORIST|CT)>\"");
 
     private GameMatch currentMatch;
     private Set<String> currentPlayers = new HashSet<>();
+    private Map<String, String> playerTeamMap = new HashMap<>();
     private LocalDateTime logStartDate;
 
     @Transactional
@@ -63,8 +67,7 @@ public class LogParserService {
     private void extractLogStartDate(String line) {
         Matcher matcher = LOG_START_PATTERN.matcher(line);
         if (matcher.find()) {
-            String logFileTimestamp = matcher.group(1); // Extract "2024_07_03_231351"
-            System.out.println("Found log file timestamp: " + logFileTimestamp);
+            String logFileTimestamp = matcher.group(1);
             DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy_MM_dd_HHmmss");
             try {
                 logStartDate = LocalDateTime.parse(logFileTimestamp, formatter);
@@ -73,12 +76,9 @@ public class LogParserService {
                 logStartDate = LocalDateTime.now(); // Fallback to current time
             }
         } else {
-            System.out.println("LOG_START_PATTERN did not match the line: " + line);
             logStartDate = LocalDateTime.now(); // Fallback
         }
     }
-
-
 
     private void processLine(String line, String filePath) {
         if (line.contains("entered the game")) {
@@ -87,6 +87,17 @@ public class LogParserService {
             processMatchStatus(line);
         } else if (line.contains("Game Over")) {
             processGameOver(line, filePath);
+        } else {
+            updatePlayerTeam(line);
+        }
+    }
+
+    private void updatePlayerTeam(String line) {
+        Matcher matcher = TEAM_ASSIGNMENT_PATTERN.matcher(line);
+        if (matcher.find()) {
+            String steamId = matcher.group(1);
+            String team = matcher.group(2);
+            playerTeamMap.put(steamId, team);
         }
     }
 
@@ -143,16 +154,19 @@ public class LogParserService {
             currentMatch.setServerName(extractServerName(filePath));
             currentMatch.setCreatedAt(logStartDate != null ? logStartDate : LocalDateTime.now());
 
+            String winningTeam = (finalScoreT > finalScoreCT) ? "TERRORIST" : "CT";
+            currentMatch.setWinningTeam(winningTeam);
+
             gameMatchRepository.save(currentMatch);
 
-            linkPlayersToMatch();
+            assignTeamsAndResults(winningTeam);
 
             currentMatch = null;
             currentPlayers.clear();
         }
     }
 
-    private void linkPlayersToMatch() {
+    private void assignTeamsAndResults(String winningTeam) {
         for (String steamId : currentPlayers) {
             Player player = playerRepository.findById(steamId)
                     .orElseThrow(() -> new IllegalArgumentException("Player with SteamID " + steamId + " not found"));
@@ -160,6 +174,9 @@ public class LogParserService {
             PlayerMatchStats matchStats = new PlayerMatchStats();
             matchStats.setGameMatch(currentMatch);
             matchStats.setPlayer(player);
+
+            String playerTeam = playerTeamMap.getOrDefault(steamId, "UNKNOWN");
+            matchStats.setTeam(playerTeam.equals(winningTeam) ? "WINNING" : "LOSING");
 
             playerMatchStatsRepository.save(matchStats);
         }

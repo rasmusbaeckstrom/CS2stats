@@ -14,6 +14,7 @@ public class GameMatch {
 
     private String mapName;
     private String serverName;
+    private String winningTeam;
 
     private LocalDateTime createdAt;
 
@@ -27,6 +28,13 @@ public class GameMatch {
     public GameMatch() {}
 
     // Getters and Setters
+    public String getWinningTeam() {
+        return winningTeam;
+    }
+
+    public void setWinningTeam(String winningTeam) {
+        this.winningTeam = winningTeam;
+    }
     public Long getId() {
         return id;
     }
