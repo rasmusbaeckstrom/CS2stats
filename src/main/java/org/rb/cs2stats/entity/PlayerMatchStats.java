@@ -14,10 +14,9 @@ public class PlayerMatchStats {
     @ManyToOne
     private GameMatch gameMatch;
 
+    private String team; // Ny kolumn för att lagra laget
 
-    // Additional fields can be added for detailed player stats if needed.
-
-    // Getters and Setters
+    // Getters och Setters
     public Long getId() {
         return id;
     }
@@ -37,4 +36,13 @@ public class PlayerMatchStats {
     public void setGameMatch(GameMatch gameMatch) {
         this.gameMatch = gameMatch;
     }
+
+    public String getTeam() {
+        return team;
+    }
+
+    public void setTeam(String team) {
+        this.team = team;
+    }
 }
+
