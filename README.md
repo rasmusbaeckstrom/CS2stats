@@ -12,12 +12,12 @@ Information about the database and settings can be found in:
 How does the application work at the moment? 
 
 1. DirectoryWatcherService
-   Monitors the directory for new .log files.
-   Passes the log file path to LogParserService for processing.
+   * Monitors the directory for new .log files.
+   * Passes the log file path to LogParserService for processing.
 
 2. LogParserService
-   Parses the log file to extract structured data.
-   Updates the database with player and match information.
+   * Parses the log file to extract structured data.
+   * Updates the database with player and match information.
 
 3. Database
-   Acts as the final repository for all information, such as match results, player statistics and team outcomes. 
+   * Acts as the final repository for all information, such as match results, player statistics and team outcomes. 
