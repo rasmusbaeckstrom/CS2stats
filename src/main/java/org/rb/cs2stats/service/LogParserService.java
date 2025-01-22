@@ -3,9 +3,11 @@ package org.rb.cs2stats.service;
 import org.rb.cs2stats.entity.GameMatch;
 import org.rb.cs2stats.entity.PlayerMatchStats;
 import org.rb.cs2stats.entity.Player;
+import org.rb.cs2stats.entity.PlayerStats;
 import org.rb.cs2stats.repository.GameMatchRepository;
 import org.rb.cs2stats.repository.PlayerMatchStatsRepository;
 import org.rb.cs2stats.repository.PlayerRepository;
+import org.rb.cs2stats.repository.PlayerStatsRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -34,17 +36,26 @@ public class LogParserService {
     @Autowired
     private PlayerMatchStatsRepository playerMatchStatsRepository;
 
+    @Autowired
+    private PlayerStatsRepository playerStatsRepository;
+
     private static final Pattern PLAYER_JOIN_PATTERN = Pattern.compile("\"(.*?)<\\d+><\\[U:1:(\\d+)]><>\" entered the game");
     private static final Pattern GAME_OVER_PATTERN = Pattern.compile("Game Over: .* score (\\d+):(\\d+) after .*");
     private static final Pattern MATCH_STATUS_PATTERN = Pattern.compile("MatchStatus: Score: (\\d+):(\\d+) on map \\\"(.*?)\\\"");
     private static final Pattern SERVER_NAME_PATTERN = Pattern.compile("\"server\" : \"(.*?)\"");
     private static final Pattern LOG_START_PATTERN = Pattern.compile("Log file started \\(file \\\"logs/(\\d{4}_\\d{2}_\\d{2}_\\d{6})_\\d+\\.log\\\"");
     private static final Pattern TEAM_ASSIGNMENT_PATTERN = Pattern.compile("\".*?<\\d+><\\[U:1:(\\d+)]><(TERRORIST|CT)>\"");
+    private static final Pattern PLAYERS_SECTION_PATTERN = Pattern.compile("\"players\"\\s*:\\s*\\{(.*?)\\}\\s*\\}\\s*JSON_END", Pattern.DOTALL);
+    private static final Pattern PLAYER_LINE_PATTERN = Pattern.compile(
+            "\"player_\\d+\"\\s*:\\s*\"\\s*(\\d+)\\s*,\\s*\\d+\\s*,\\s*\\d+\\s*,\\s*(\\d+)\\s*,\\s*(\\d+),.*?\""
+    );
+
 
     private GameMatch currentMatch;
     private Set<String> currentPlayers = new HashSet<>();
     private Map<String, String> playerTeamMap = new HashMap<>();
     private LocalDateTime logStartDate;
+
 
     @Transactional
     public void parseLogFile(String filePath) {
@@ -80,13 +91,28 @@ public class LogParserService {
         }
     }
 
+    private StringBuilder jsonSegmentBuilder = new StringBuilder();
+    private boolean isInJsonBlock = false;
+
     private void processLine(String line, String filePath) {
-        if (line.contains("entered the game")) {
-            processPlayerJoin(line);
+        if (line.contains("JSON_BEGIN")) {
+            isInJsonBlock = true;
+            jsonSegmentBuilder.setLength(0); // Rensa tidigare JSON-data
+        }
+
+        if (isInJsonBlock) {
+            jsonSegmentBuilder.append(line).append("\n");
+            if (line.contains("JSON_END")) {
+                isInJsonBlock = false;
+            }
+        }
+
+        if (line.contains("Game Over")) {
+            processGameOver(line, filePath);
         } else if (line.contains("MatchStatus: Score:")) {
             processMatchStatus(line);
-        } else if (line.contains("Game Over")) {
-            processGameOver(line, filePath);
+        } else if (line.contains("entered the game")) {
+            processPlayerJoin(line);
         } else {
             updatePlayerTeam(line);
         }
@@ -157,6 +183,11 @@ public class LogParserService {
             String winningTeam = (finalScoreT > finalScoreCT) ? "TERRORIST" : "CT";
             currentMatch.setWinningTeam(winningTeam);
 
+            // Bearbeta spelarstatistik från JSON
+            if (jsonSegmentBuilder.length() > 0) {
+                processPlayerStats(jsonSegmentBuilder.toString());
+            }
+
             gameMatchRepository.save(currentMatch);
 
             assignTeamsAndResults(winningTeam);
@@ -164,6 +195,41 @@ public class LogParserService {
             currentMatch = null;
             currentPlayers.clear();
         }
+    }
+
+    private void processPlayerStats(String jsonSegment) {
+        Matcher playersSectionMatcher = PLAYERS_SECTION_PATTERN.matcher(jsonSegment);
+        if (playersSectionMatcher.find()) {
+            String playersData = playersSectionMatcher.group(1);
+            Matcher playerLineMatcher = PLAYER_LINE_PATTERN.matcher(playersData);
+
+            while (playerLineMatcher.find()) {
+                String accountId = playerLineMatcher.group(1);
+                int kills = Integer.parseInt(playerLineMatcher.group(2));
+                int deaths = Integer.parseInt(playerLineMatcher.group(3));
+
+                savePlayerStats(accountId, kills, deaths);
+            }
+        } else {
+            System.err.println("No players section found in the JSON segment.");
+        }
+    }
+
+    private void savePlayerStats(String accountId, int kills, int deaths) {
+        Player player = playerRepository.findById(accountId).orElseGet(() -> {
+            Player newPlayer = new Player();
+            newPlayer.setSteamId(accountId);
+            playerRepository.save(newPlayer);
+            return newPlayer;
+        });
+
+        PlayerStats playerStats = new PlayerStats();
+        playerStats.setPlayer(player);
+        playerStats.setGameMatch(currentMatch);
+        playerStats.setKills(kills);
+        playerStats.setDeaths(deaths);
+
+        playerStatsRepository.save(playerStats);
     }
 
     private void assignTeamsAndResults(String winningTeam) {
