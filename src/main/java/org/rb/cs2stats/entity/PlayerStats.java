@@ -1,5 +1,6 @@
 package org.rb.cs2stats.entity;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 
 @Entity
@@ -13,6 +14,7 @@ public class PlayerStats {
     private Player player;
 
     @ManyToOne
+    @JsonIgnore
     private GameMatch gameMatch;
 
     private int kills;

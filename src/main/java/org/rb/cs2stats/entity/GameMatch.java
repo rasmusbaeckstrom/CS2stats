@@ -1,5 +1,6 @@
 package org.rb.cs2stats.entity;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -22,6 +23,7 @@ public class GameMatch {
     private Integer scoreT;
 
     @OneToMany(mappedBy = "gameMatch", cascade = CascadeType.ALL, orphanRemoval = true)
+    @JsonIgnore
     private List<PlayerMatchStats> playerStats = new ArrayList<>();
 
     // Constructors
