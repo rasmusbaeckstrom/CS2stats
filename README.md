@@ -1,4 +1,4 @@
-CS2 stats application (updated 2025-01-20)
+CS2 stats application (updated 2025-01-27)
 
 1. Clone the repository and open the project (I use IntelliJ IDEA).
 2. Start Docker engine (I use Docker Desktop).
