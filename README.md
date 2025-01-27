@@ -12,8 +12,11 @@ Information about the database and settings can be found in:
 How does the application work at the moment? 
 
 1. DirectoryWatcherService
-   * Monitors the directory for new .log files.
+   * Monitors the directory 'src/main/resources' for new .log files.
    * Passes the log file path to LogParserService for processing.
+   * Moves the processed log files to the 'src/main/resources/processed' directory.
+
+If you want to try the application, just move the `.log` file from the `processed` directory to the `resources` directory.
 
 2. LogParserService
    * Parses the log file to extract structured data.
